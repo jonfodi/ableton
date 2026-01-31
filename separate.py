@@ -28,6 +28,20 @@ except ImportError:
     print("Install with: pip install torch torchaudio")
     sys.exit(1)
 
+# Optional imports for fallback audio loading/saving
+try:
+    from pydub import AudioSegment
+    import numpy as np
+    HAS_PYDUB = True
+except ImportError:
+    HAS_PYDUB = False
+
+try:
+    import soundfile as sf
+    HAS_SOUNDFILE = True
+except ImportError:
+    HAS_SOUNDFILE = False
+
 try:
     from demucs.apply import apply_model
     from demucs.pretrained import get_model
@@ -153,6 +167,70 @@ def parse_time(time_str: str) -> float:
             raise ValueError(f"Invalid time format: {time_str}. Use 'ss' or 'mm:ss'")
 
 
+def save_audio_with_soundfile(audio_tensor: torch.Tensor, file_path: Path, samplerate: int) -> None:
+    """
+    Save audio using soundfile as a fallback method.
+    
+    Args:
+        audio_tensor: Audio tensor of shape (channels, samples)
+        file_path: Path to save the audio file
+        samplerate: Sample rate in Hz
+    """
+    if not HAS_SOUNDFILE:
+        raise RuntimeError("soundfile is not installed. Install with: pip install soundfile")
+    
+    # Convert to numpy and transpose to (samples, channels) for soundfile
+    audio_np = audio_tensor.numpy().T
+    
+    # Clip to valid range for WAV
+    audio_np = np.clip(audio_np, -1.0, 1.0)
+    
+    # Save as WAV
+    sf.write(str(file_path), audio_np, samplerate)
+
+
+def load_audio_with_pydub(file_path: Path) -> tuple[torch.Tensor, int]:
+    """
+    Load audio using pydub as a fallback method.
+    
+    Args:
+        file_path: Path to the audio file
+        
+    Returns:
+        Tuple of (waveform tensor, sample_rate)
+    """
+    if not HAS_PYDUB:
+        raise RuntimeError("pydub is not installed. Install with: pip install pydub")
+    
+    # Load with pydub (requires ffmpeg)
+    audio = AudioSegment.from_file(str(file_path))
+    
+    # Get sample rate and convert to numpy array
+    sample_rate = audio.frame_rate
+    
+    # Convert to numpy array
+    samples = np.array(audio.get_array_of_samples())
+    
+    # Handle stereo/mono
+    if audio.channels == 2:
+        samples = samples.reshape((-1, 2)).T
+    else:
+        samples = samples.reshape((1, -1))
+    
+    # Normalize to float32 in range [-1, 1]
+    if audio.sample_width == 1:
+        samples = samples.astype(np.float32) / 128.0 - 1.0
+    elif audio.sample_width == 2:
+        samples = samples.astype(np.float32) / 32768.0
+    elif audio.sample_width == 4:
+        samples = samples.astype(np.float32) / 2147483648.0
+    
+    # Convert to torch tensor
+    waveform = torch.from_numpy(samples)
+    
+    return waveform, sample_rate
+
+
 def get_device() -> torch.device:
     """
     Determine the best available device for processing.
@@ -215,7 +293,7 @@ def separate_audio(
     
     # Step 1: Load the model
     print(f"[1/4] Loading model '{model_name}'...")
-    start_time = time.time()
+    step_timer = time.time()
     
     try:
         model = get_model(model_name)
@@ -225,7 +303,7 @@ def separate_audio(
     model.to(device)
     model.eval()  # Set to evaluation mode
     
-    load_time = time.time() - start_time
+    load_time = time.time() - step_timer
     print(f"       Model loaded in {format_time(load_time)}")
     
     # Determine which stems to extract
@@ -239,32 +317,28 @@ def separate_audio(
     
     # Step 2: Load the audio file
     print(f"\n[2/4] Loading audio file...")
-    start_time = time.time()
+    step_timer = time.time()
     
     try:
-        # Load audio using torchaudio
-        # Try different backends in order of preference
-        backends_to_try = ["ffmpeg", "soundfile", "sox"]
-        waveform = None
-        last_error = None
-        
-        for backend in backends_to_try:
-            try:
-                waveform, sample_rate = torchaudio.load(input_path, backend=backend)
-                break
-            except Exception as e:
-                last_error = e
-                continue
-        
-        if waveform is None:
-            raise last_error or RuntimeError("No suitable audio backend found")
-            
+        # Try loading with torchaudio first
+        try:
+            waveform, sample_rate = torchaudio.load(input_path)
+        except Exception as torchaudio_error:
+            # Fall back to pydub for formats like MP3
+            if HAS_PYDUB:
+                print(f"       Using pydub fallback for audio loading...")
+                waveform, sample_rate = load_audio_with_pydub(input_path)
+            else:
+                raise RuntimeError(
+                    f"torchaudio failed: {torchaudio_error}\n"
+                    "Install pydub as fallback: pip install pydub"
+                )
     except Exception as e:
         raise RuntimeError(f"Failed to load audio file: {e}")
     
     # Get audio duration for progress estimation
-    duration = waveform.shape[1] / sample_rate
-    print(f"       Duration: {format_time(duration)}")
+    audio_duration = waveform.shape[1] / sample_rate
+    print(f"       Duration: {format_time(audio_duration)}")
     print(f"       Sample rate: {sample_rate} Hz")
     print(f"       Channels: {waveform.shape[0]}")
     
@@ -304,18 +378,18 @@ def separate_audio(
         # Slice the waveform
         waveform = waveform[:, start_sample:end_sample]
         
-        # Update duration for the sliced audio
-        duration = (end_sample - start_sample) / sample_rate
+        # Update audio_duration for the sliced audio
+        audio_duration = (end_sample - start_sample) / sample_rate
         actual_start = start_sample / sample_rate
-        print(f"       Extracted: {format_time(actual_start)} to {format_time(actual_start + duration)}")
-        print(f"       Segment duration: {format_time(duration)}")
+        print(f"       Extracted: {format_time(actual_start)} to {format_time(actual_start + audio_duration)}")
+        print(f"       Segment duration: {format_time(audio_duration)}")
     
-    load_time = time.time() - start_time
+    load_time = time.time() - step_timer
     print(f"       Audio loaded in {format_time(load_time)}")
     
     # Step 3: Perform separation
     print(f"\n[3/4] Separating stems (this may take a while)...")
-    start_time = time.time()
+    step_timer = time.time()
     
     # Add batch dimension and move to device
     # Shape: (batch, channels, samples)
@@ -329,7 +403,7 @@ def separate_audio(
     else:
         estimated_factor = 3.0  # CPU is slower
     
-    estimated_time = duration * estimated_factor
+    estimated_time = audio_duration * estimated_factor
     print(f"       Estimated time: ~{format_time(estimated_time)}")
     print(f"       Processing...", end="", flush=True)
     
@@ -338,12 +412,12 @@ def separate_audio(
         # Output shape: (batch, sources, channels, samples)
         sources = apply_model(model, audio_tensor, device=device, progress=True)
     
-    separation_time = time.time() - start_time
+    separation_time = time.time() - step_timer
     print(f"\n       Separation completed in {format_time(separation_time)}")
     
     # Step 4: Save the stems
     print(f"\n[4/4] Saving stems...")
-    start_time = time.time()
+    step_timer = time.time()
     
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -369,12 +443,19 @@ def separate_audio(
         output_file = output_dir / f"{base_name}_{stem_name}.wav"
         
         # Save the stem as WAV
-        save_audio(stem_audio, output_file, samplerate=sample_rate)
+        try:
+            save_audio(stem_audio, output_file, samplerate=sample_rate)
+        except Exception:
+            # Fall back to soundfile for saving
+            if HAS_SOUNDFILE:
+                save_audio_with_soundfile(stem_audio, output_file, sample_rate)
+            else:
+                raise RuntimeError("Failed to save audio. Install soundfile: pip install soundfile")
         
         output_paths[stem_name] = output_file
         print(f"       Saved: {output_file}")
     
-    save_time = time.time() - start_time
+    save_time = time.time() - step_timer
     print(f"       All stems saved in {format_time(save_time)}")
     
     return output_paths

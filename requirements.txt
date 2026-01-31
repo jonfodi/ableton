@@ -7,3 +7,7 @@ torchaudio>=2.0.0
 
 # Demucs - Facebook's audio source separation model
 demucs>=4.0.0
+
+# Audio loading/saving fallbacks (for newer torchaudio versions)
+pydub>=0.25.0
+soundfile>=0.12.0
