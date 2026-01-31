@@ -1,0 +1,9 @@
+# Audio Stem Separation Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core ML framework
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# Demucs - Facebook's audio source separation model
+demucs>=4.0.0
