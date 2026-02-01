@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "audio-analyzer": {
+      "command": "/Users/jonathanfodi/Developer/PROJECTS/TUNES/venv/bin/python",
+      "args": ["/Users/jonathanfodi/Developer/PROJECTS/TUNES/audio_analyzer/src/server.py"]
+    }
+  }
+}

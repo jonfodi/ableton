@@ -1,4 +1,4 @@
-# Audio Stem Separation Dependencies
+# Audio Stem Separation & Analysis Dependencies
 # Install with: pip install -r requirements.txt
 
 # Core ML framework
@@ -11,3 +11,10 @@ demucs>=4.0.0
 # Audio loading/saving fallbacks (for newer torchaudio versions)
 pydub>=0.25.0
 soundfile>=0.12.0
+
+# Audio analysis
+librosa>=0.10.0
+matplotlib>=3.7.0
+
+# MCP Server
+mcp>=1.0.0
